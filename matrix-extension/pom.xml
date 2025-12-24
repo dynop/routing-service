@@ -16,7 +16,16 @@
         <junit.version>5.10.2</junit.version>
         <mockito.version>5.11.0</mockito.version>
         <jmh.version>1.37</jmh.version>
+        <geotools.version>29.2</geotools.version>
     </properties>
+
+    <repositories>
+        <repository>
+            <id>osgeo</id>
+            <name>OSGeo Release Repository</name>
+            <url>https://repo.osgeo.org/repository/release/</url>
+        </repository>
+    </repositories>
 
     <dependencies>
         <!-- GraphHopper core and web modules -->
@@ -89,6 +98,25 @@
             <artifactId>awaitility</artifactId>
             <version>4.2.1</version>
             <scope>test</scope>
+        </dependency>
+
+        <!-- JTS for land geometry filtering (ocean routing) -->
+        <dependency>
+            <groupId>org.locationtech.jts</groupId>
+            <artifactId>jts-core</artifactId>
+            <version>1.19.0</version>
+        </dependency>
+        
+        <!-- GeoTools for reading Natural Earth shapefiles -->
+        <dependency>
+            <groupId>org.geotools</groupId>
+            <artifactId>gt-shapefile</artifactId>
+            <version>29.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.geotools</groupId>
+            <artifactId>gt-epsg-hsql</artifactId>
+            <version>29.2</version>
         </dependency>
 
         <!-- JMH -->

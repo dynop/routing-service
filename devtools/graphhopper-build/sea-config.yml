@@ -1,0 +1,52 @@
+# Sea routing configuration for GraphHopper
+# This configuration is used for loading the pre-built sea-lane graph
+
+graphhopper:
+  # Graph storage location (built by SeaLaneGraphBuilder)
+  graph.location: graph-cache/sea
+
+  # Profiles for sea routing
+  profiles:
+    - name: ship
+      vehicle: ship
+      weighting: fastest
+      custom_model_files:
+        - dynop-ship.json
+      turn_costs: false
+
+  # Contraction Hierarchies for fast routing
+  profiles_ch:
+    - profile: ship
+
+  # Landmark routing (fallback)
+  profiles_lm:
+    - profile: ship
+      preparation:
+        landmark_count: 16
+
+  # Server settings
+  server:
+    application_connectors:
+      - type: http
+        port: 8990
+        bind_host: 0.0.0.0
+    admin_connectors:
+      - type: http
+        port: 8991
+        bind_host: 0.0.0.0
+    request_log:
+      appenders: []
+
+  # Graph configuration
+  graph:
+    elevation:
+      provider: noop
+      cache_dir: ./elevation-cache/
+    encoded_values: road_class
+
+  # Routing settings
+  routing:
+    non_ch:
+      max_waypoint_distance: 1000000
+    ch:
+      disabling_allowed: true

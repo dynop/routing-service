@@ -3,6 +3,8 @@ package com.dynop.graphhopper.matrix.api;
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.Timer;
+import com.dynop.graphhopper.matrix.config.RoutingEngineRegistry;
+import com.dynop.graphhopper.matrix.sea.*;
 import com.graphhopper.GraphHopper;
 import com.graphhopper.config.Profile;
 import com.graphhopper.routing.AlgorithmOptions;
@@ -24,6 +26,7 @@ import com.graphhopper.storage.index.Snap;
 import com.graphhopper.util.PMap;
 import com.graphhopper.util.Parameters;
 import com.graphhopper.util.exceptions.ConnectionNotFoundException;
+import com.graphhopper.util.shapes.GHPoint;
 import com.graphhopper.util.shapes.GHPoint3D;
 import jakarta.inject.Inject;
 import jakarta.inject.Named;
@@ -34,11 +37,13 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -48,32 +53,64 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.function.Supplier;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 /**
  * REST resource that exposes the high-performance matrix endpoint.
+ * 
+ * <p>Supports both road and sea routing modes:
+ * <ul>
+ *   <li>{@code mode=road} (default): Uses the truck/road GraphHopper instance</li>
+ *   <li>{@code mode=sea}: Uses the sea-lane GraphHopper instance with optional chokepoint exclusion</li>
+ * </ul>
+ * 
+ * <p>Sea routing includes:
+ * <ul>
+ *   <li>Two-stage port snapping: user coord → UN/LOCODE port → sea graph node</li>
+ *   <li>Chokepoint exclusion via {@code excluded_chokepoints} list</li>
+ *   <li>Port metadata in response</li>
+ * </ul>
  */
 @Path("/custom/matrix")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class MatrixResource {
 
+    private static final Logger LOGGER = Logger.getLogger(MatrixResource.class.getName());
     private static final int MAX_DIMENSION = 5_000;
+    
+    // Default sea profile name
+    private static final String SEA_PROFILE = "ship";
 
     private final GraphHopper graphHopper;
     private final ExecutorService executorService;
     private final Timer requestLatency;
     private final Meter routeThroughput;
+    
+    // Sea routing components (nullable if sea routing is not configured)
+    private final RoutingEngineRegistry routingEngineRegistry;
+    private final ChokepointRegistry chokepointRegistry;
+    private final UnlocodePortSnapper portSnapper;
 
     @Inject
     public MatrixResource(GraphHopper graphHopper,
                           @Named(MatrixResourceBindings.EXECUTOR_BINDING) ExecutorService executorService,
-                          MetricRegistry metrics) {
+                          MetricRegistry metrics,
+                          @Nullable RoutingEngineRegistry routingEngineRegistry,
+                          @Nullable ChokepointRegistry chokepointRegistry,
+                          @Nullable UnlocodePortSnapper portSnapper) {
         this.graphHopper = Objects.requireNonNull(graphHopper, "graphHopper");
         this.executorService = Objects.requireNonNull(executorService, "executorService");
         Objects.requireNonNull(metrics, "metrics");
         this.requestLatency = metrics.timer("matrix.requests.latency");
         this.routeThroughput = metrics.meter("matrix.routes.per_second");
+        
+        // Sea routing components are optional
+        this.routingEngineRegistry = routingEngineRegistry;
+        this.chokepointRegistry = chokepointRegistry;
+        this.portSnapper = portSnapper;
     }
 
     /**
@@ -93,6 +130,24 @@ public class MatrixResource {
         }
 
         Timer.Context timerContext = requestLatency.time();
+        try {
+            // Determine routing mode
+            RoutingMode mode = request.getMode() != null ? request.getMode() : RoutingMode.ROAD;
+            
+            if (mode == RoutingMode.SEA) {
+                return computeSeaMatrix(request);
+            } else {
+                return computeRoadMatrix(request);
+            }
+        } finally {
+            timerContext.stop();
+        }
+    }
+    
+    /**
+     * Compute matrix using road routing (original implementation).
+     */
+    private Response computeRoadMatrix(MatrixRequest request) {
         try {
             Profile profile = graphHopper.getProfile(request.getProfile());
             if (profile == null) {
@@ -140,7 +195,7 @@ public class MatrixResource {
             }
 
             routeThroughput.mark((long) sources.size() * targets.size());
-            MatrixResponse response = new MatrixResponse(distances, times, failures);
+            MatrixResponse response = new MatrixResponse(distances, times, failures, RoutingMode.ROAD);
             return Response.ok(response).build();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -149,8 +204,159 @@ public class MatrixResource {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
             throw new WebApplicationException(errorResponse(Response.Status.INTERNAL_SERVER_ERROR,
                     "Matrix computation failed: " + cause.getMessage()));
-        } finally {
-            timerContext.stop();
+        }
+    }
+    
+    /**
+     * Compute matrix using sea routing with port snapping and optional chokepoint exclusion.
+     */
+    private Response computeSeaMatrix(MatrixRequest request) {
+        // Validate sea routing is available
+        if (routingEngineRegistry == null || !routingEngineRegistry.isSeaRoutingAvailable()) {
+            return Response.ok(MatrixResponse.failure("SEA_ROUTING_UNAVAILABLE",
+                    "Sea routing is not configured. Build the sea graph first.")).build();
+        }
+        
+        if (portSnapper == null) {
+            return Response.ok(MatrixResponse.failure("PORT_DATA_UNAVAILABLE",
+                    "UN/LOCODE port data is not loaded.")).build();
+        }
+        
+        GraphHopper seaHopper = routingEngineRegistry.getHopper(RoutingMode.SEA);
+        
+        try {
+            // Get the sea profile
+            String profileName = SEA_PROFILE;
+            Profile profile = seaHopper.getProfile(profileName);
+            if (profile == null) {
+                // Try first available profile
+                List<Profile> profiles = seaHopper.getProfiles();
+                if (profiles.isEmpty()) {
+                    return Response.ok(MatrixResponse.failure("NO_SEA_PROFILE",
+                            "No sea routing profile configured.")).build();
+                }
+                profile = profiles.get(0);
+                profileName = profile.getName();
+            }
+
+            RoutingCHGraph chGraph = seaHopper.getCHGraphs().get(profileName);
+            LandmarkStorage landmarkStorage = seaHopper.getLandmarks().get(profileName);
+            boolean chEnabled = chGraph != null;
+            boolean lmEnabled = landmarkStorage != null;
+
+            if (!chEnabled && !request.isEnableFallback()) {
+                return Response.ok(MatrixResponse.failure("CH_UNAVAILABLE",
+                        "CH not available for sea profile and fallback disabled")).build();
+            }
+
+            List<List<Double>> points = request.getPoints();
+            List<Integer> sources = request.getSources();
+            List<Integer> targets = request.getTargets();
+            validateMatrixSize(sources.size(), targets.size());
+
+            // Stage 1: Port snapping - snap all input coordinates to nearest UN/LOCODE ports
+            List<PortSnapResult> portSnaps = new ArrayList<>(points.size());
+            List<GHPoint> snappedPortCoords = new ArrayList<>(points.size());
+            List<Integer> snapFailures = new ArrayList<>();
+            
+            for (int idx = 0; idx < points.size(); idx++) {
+                final int i = idx;
+                List<Double> coord = points.get(i);
+                double lat = coord.get(0);
+                double lon = coord.get(1);
+                
+                // Determine port role based on whether this point is a source or target
+                PortRole role = sources.contains(i) ? PortRole.PORT_OF_LOADING : PortRole.PORT_OF_DISCHARGE;
+                
+                try {
+                    PortSnapResult snapResult = portSnapper.snap(lat, lon, role);
+                    portSnaps.add(snapResult);
+                    snappedPortCoords.add(new GHPoint(snapResult.getLat(), snapResult.getLon()));
+                } catch (PortSnapException e) {
+                    LOGGER.log(Level.FINE, () -> String.format(
+                        "Port snap failed for point %d (%.4f, %.4f): %s", i, lat, lon, e.getMessage()));
+                    portSnaps.add(null);
+                    snappedPortCoords.add(null);
+                    snapFailures.add(i);
+                }
+            }
+
+            // Stage 2: Graph snapping - snap port coordinates to sea graph nodes
+            long[][] distances = initializeMatrix(sources.size(), targets.size());
+            long[][] times = initializeMatrix(sources.size(), targets.size());
+
+            LocationIndex locationIndex = seaHopper.getLocationIndex();
+            
+            // Build edge filter for chokepoint exclusion
+            EdgeFilter edgeFilter;
+            List<String> appliedChokepoints = new ArrayList<>();
+            if (request.getExcludedChokepoints() != null && !request.getExcludedChokepoints().isEmpty() 
+                    && chokepointRegistry != null) {
+                Set<Integer> excludedNodes = chokepointRegistry.getExcludedNodeIds(request.getExcludedChokepoints());
+                if (!excludedNodes.isEmpty()) {
+                    edgeFilter = new ChokepointAwareEdgeFilter(excludedNodes);
+                    appliedChokepoints.addAll(request.getExcludedChokepoints());
+                } else {
+                    edgeFilter = EdgeFilter.ALL_EDGES;
+                }
+            } else {
+                edgeFilter = EdgeFilter.ALL_EDGES;
+            }
+            
+            Snap[] snaps = snapPointsWithFilter(snappedPortCoords, locationIndex, edgeFilter);
+            List<Integer> graphFailures = collectFailures(snaps);
+            
+            // Merge snap failures
+            Set<Integer> allFailures = new HashSet<>(snapFailures);
+            allFailures.addAll(graphFailures);
+            List<Integer> failures = new ArrayList<>(allFailures);
+            Collections.sort(failures);
+            
+            prefillFailures(sources, targets, failures, distances, times);
+
+            Weighting weighting = seaHopper.createWeighting(profile, new PMap());
+            AlgorithmOptions flexAlgoOpts = buildAlgorithmOptions(profile, seaHopper.getRouterConfig());
+            PMap chHints = buildChHints(profile, seaHopper.getRouterConfig());
+            RoutingAlgorithmFactory fallbackFactory = createFallbackFactory(lmEnabled, landmarkStorage, seaHopper);
+
+            BaseGraph baseGraph = seaHopper.getBaseGraph();
+            List<Callable<Void>> tasks = new ArrayList<>(sources.size());
+            for (int rowIdx = 0; rowIdx < sources.size(); rowIdx++) {
+                tasks.add(createRowTask(rowIdx, sources, targets, snaps, chEnabled, chGraph, weighting,
+                        flexAlgoOpts, chHints, fallbackFactory, baseGraph, distances, times));
+            }
+
+            List<Future<Void>> futures = executorService.invokeAll(tasks);
+            for (Future<Void> future : futures) {
+                future.get();
+            }
+
+            routeThroughput.mark((long) sources.size() * targets.size());
+            
+            // Build response with port snapping metadata
+            List<PortSnapResult> validPortSnaps = portSnaps.stream()
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toList());
+            
+            MatrixResponse response = new MatrixResponse(
+                    distances, 
+                    times, 
+                    failures, 
+                    RoutingMode.SEA,
+                    appliedChokepoints,
+                    validPortSnaps
+            );
+            return Response.ok(response).build();
+            
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return Response.ok(MatrixResponse.failure("INTERRUPTED", 
+                    "Sea matrix computation interrupted")).build();
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            LOGGER.log(Level.WARNING, "Sea matrix computation failed", e);
+            return Response.ok(MatrixResponse.failure("COMPUTATION_FAILED",
+                    "Sea matrix computation failed: " + cause.getMessage())).build();
         }
     }
 
@@ -281,9 +487,14 @@ public class MatrixResource {
     }
 
     private RoutingAlgorithmFactory createFallbackFactory(boolean lmEnabled, LandmarkStorage landmarkStorage) {
+        return createFallbackFactory(lmEnabled, landmarkStorage, graphHopper);
+    }
+    
+    private RoutingAlgorithmFactory createFallbackFactory(boolean lmEnabled, LandmarkStorage landmarkStorage, 
+                                                          GraphHopper hopper) {
         if (lmEnabled) {
             return new LMRoutingAlgorithmFactory(landmarkStorage)
-                    .setDefaultActiveLandmarks(graphHopper.getRouterConfig().getActiveLandmarkCount());
+                    .setDefaultActiveLandmarks(hopper.getRouterConfig().getActiveLandmarkCount());
         }
         return new RoutingAlgorithmFactorySimple();
     }
@@ -319,6 +530,23 @@ public class MatrixResource {
             double lat = coord.get(0);
             double lon = coord.get(1);
             snaps[i] = locationIndex.findClosest(lat, lon, EdgeFilter.ALL_EDGES);
+        }
+        return snaps;
+    }
+    
+    /**
+     * Snap points using a custom edge filter (for chokepoint exclusion in sea routing).
+     */
+    private static Snap[] snapPointsWithFilter(List<GHPoint> points, LocationIndex locationIndex, 
+                                               EdgeFilter edgeFilter) {
+        Snap[] snaps = new Snap[points.size()];
+        for (int i = 0; i < points.size(); i++) {
+            GHPoint point = points.get(i);
+            if (point == null) {
+                snaps[i] = new Snap(0, 0); // invalid snap placeholder
+            } else {
+                snaps[i] = locationIndex.findClosest(point.getLat(), point.getLon(), edgeFilter);
+            }
         }
         return snaps;
     }

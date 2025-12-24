@@ -71,7 +71,8 @@ class MatrixResourceTest {
                     return futures;
                 });
 
-        resource = new MatrixResource(graphHopper, executorService, new MetricRegistry());
+        resource = new MatrixResource(graphHopper, executorService, new MetricRegistry(), 
+                null, null, null);
     }
 
     @Test

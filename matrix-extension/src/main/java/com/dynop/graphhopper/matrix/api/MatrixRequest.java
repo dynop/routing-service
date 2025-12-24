@@ -12,6 +12,18 @@ import java.util.Set;
 
 /**
  * Immutable request payload for the custom matrix endpoint.
+ * 
+ * <p>Supports both road and sea routing modes:
+ * <ul>
+ *   <li>{@code mode=road} (default): Uses the road graph for truck routing</li>
+ *   <li>{@code mode=sea}: Uses the maritime graph for ocean freight routing</li>
+ * </ul>
+ * 
+ * <p>For sea routing, additional parameters are available:
+ * <ul>
+ *   <li>{@code excluded_chokepoints}: List of chokepoint IDs to exclude (e.g., ["SUEZ"])</li>
+ *   <li>{@code validate_coordinates}: Whether to validate coordinates against land mask</li>
+ * </ul>
  */
 public final class MatrixRequest {
 
@@ -23,6 +35,9 @@ public final class MatrixRequest {
     private final String profile;
     private final List<String> metrics;
     private final boolean enableFallback;
+    private final RoutingMode mode;
+    private final List<String> excludedChokepoints;
+    private final boolean validateCoordinates;
 
     @JsonCreator
     public MatrixRequest(
@@ -31,7 +46,10 @@ public final class MatrixRequest {
             @JsonProperty("targets") List<Integer> targets,
             @JsonProperty(value = "profile", required = true) String profile,
             @JsonProperty(value = "metrics", required = true) List<String> metrics,
-            @JsonProperty(value = "enableFallback", defaultValue = "false") Boolean enableFallback) {
+            @JsonProperty(value = "enableFallback", defaultValue = "false") Boolean enableFallback,
+            @JsonProperty(value = "mode", defaultValue = "road") String mode,
+            @JsonProperty(value = "excluded_chokepoints") List<String> excludedChokepoints,
+            @JsonProperty(value = "validate_coordinates", defaultValue = "true") Boolean validateCoordinates) {
 
         this.points = validatePoints(points);
         this.sources = normalizeIndices(sources, this.points.size());
@@ -39,6 +57,24 @@ public final class MatrixRequest {
         this.profile = Objects.requireNonNull(profile, "profile is required");
         this.metrics = validateMetrics(metrics);
         this.enableFallback = Boolean.TRUE.equals(enableFallback);
+        this.mode = parseRoutingMode(mode);
+        this.excludedChokepoints = excludedChokepoints != null 
+            ? Collections.unmodifiableList(new ArrayList<>(excludedChokepoints))
+            : Collections.emptyList();
+        this.validateCoordinates = validateCoordinates == null || validateCoordinates;
+    }
+    
+    /**
+     * Backward-compatible constructor without sea routing parameters.
+     */
+    public MatrixRequest(
+            List<List<Double>> points,
+            List<Integer> sources,
+            List<Integer> targets,
+            String profile,
+            List<String> metrics,
+            Boolean enableFallback) {
+        this(points, sources, targets, profile, metrics, enableFallback, "road", null, true);
     }
 
     public List<List<Double>> getPoints() {
@@ -63,6 +99,44 @@ public final class MatrixRequest {
 
     public boolean isEnableFallback() {
         return enableFallback;
+    }
+    
+    /**
+     * @return Routing mode (ROAD or SEA)
+     */
+    public RoutingMode getMode() {
+        return mode;
+    }
+    
+    /**
+     * @return List of chokepoint IDs to exclude from routing (sea mode only)
+     */
+    public List<String> getExcludedChokepoints() {
+        return excludedChokepoints;
+    }
+    
+    /**
+     * @return Whether to validate coordinates against land mask (sea mode only)
+     */
+    public boolean isValidateCoordinates() {
+        return validateCoordinates;
+    }
+    
+    /**
+     * @return true if this is a sea routing request
+     */
+    public boolean isSeaRouting() {
+        return mode == RoutingMode.SEA;
+    }
+    
+    private static RoutingMode parseRoutingMode(String mode) {
+        if (mode == null || mode.isBlank() || mode.equalsIgnoreCase("road")) {
+            return RoutingMode.ROAD;
+        }
+        if (mode.equalsIgnoreCase("sea")) {
+            return RoutingMode.SEA;
+        }
+        throw new IllegalArgumentException("Invalid routing mode: " + mode + ". Valid values: road, sea");
     }
 
     private static List<List<Double>> validatePoints(List<List<Double>> rawPoints) {
