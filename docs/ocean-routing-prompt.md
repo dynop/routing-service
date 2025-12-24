@@ -1,4 +1,4 @@
-# 🌊 GitHub Copilot Prompt — Sea-Lane Graph Builder (GraphHopper-Native, Java)
+# 🌊 GitHub Copilot Prompt — Ocean Routing Engine (GraphHopper-Native, Java)
 
 ## 🚨 FULLY UPDATED — DO NOT DEVIATE 🚨
 
@@ -20,7 +20,7 @@ Sea routing MUST integrate cleanly without introducing parallel routing stacks.
 
 ## 🎯 Objective
 
-Implement a **GraphHopper-native Sea-Lane Graph Builder** and integrate it into the existing routing server so that:
+Implement a **GraphHopper-native Ocean Routing Engine** and integrate it into the existing routing server so that:
 
 - 🚛 Truck routing continues to use the existing road graph
 - 🚢 Sea routing uses a **separate maritime graph** built offline
@@ -90,6 +90,334 @@ resources/
 - Use `ne_50m_land.geojson` for accurate coastline masking near ports and chokepoints
 - 50m resolution provides good balance between accuracy and file size (~5MB)
 - **DO NOT** attempt to derive land geometry from OSM PBF at runtime
+
+### 📁 UN/LOCODE Port Data (AUTHORITATIVE SOURCE)
+
+Bundle the official UN/LOCODE data for port snapping:
+
+```
+unlocode-data/
+├── 2024-2 UNLOCODE CodeListPart1.csv   # Countries A-K (approx.)
+├── 2024-2 UNLOCODE CodeListPart2.csv   # Countries L-Q (approx.)
+├── 2024-2 UNLOCODE CodeListPart3.csv   # Countries R-Z (approx.)
+├── 2024-2 SubdivisionCodes.csv         # ISO 3166-2 subdivision codes
+└── guide.md                             # Official UN/LOCODE documentation
+```
+
+**Source:** [UNECE UN/LOCODE](https://unece.org/trade/cefact/UNLOCODE-Download)
+
+#### 📊 CSV Column Structure
+
+The UN/LOCODE CSV files have the following columns (11 total):
+
+| Column Index | Name | Description | Example |
+|--------------|------|-------------|---------|
+| 0 | `Ch` | Change indicator (`+`=added, `#`=name change, `X`=remove, `\|`=changed) | ` `, `+`, `\|` |
+| 1 | `Country` | ISO 3166 alpha-2 country code | `NL`, `CN`, `US` |
+| 2 | `Location` | 3-character location code | `RTM`, `SGH`, `LAX` |
+| 3 | `Name` | Location name (with diacritics) | `Rotterdam`, `上海` |
+| 4 | `NameWoDiacritics` | Name without diacritics | `Rotterdam`, `Shanghai` |
+| 5 | `SubDiv` | ISO 3166-2 subdivision code (state/province) | `ZH`, `SH`, `CA` |
+| 6 | `Function` | 8-digit function classifier (see below) | `12345---`, `1-------` |
+| 7 | `Status` | Entry status code | `AI`, `RL`, `AA`, `AF` |
+| 8 | `Date` | Last update date (YYMM format) | `0501`, `2407` |
+| 9 | `IATA` | IATA code if different from location code | `LAX` |
+| 10 | `Coordinates` | Geographic coordinates | `5155N 00430E` |
+
+#### 🚢 Function Code Interpretation (CRITICAL FOR PORT FILTERING)
+
+The **Function** column (index 6) is an 8-character string where each position indicates a function:
+
+| Position | Value | Meaning |
+|----------|-------|---------|
+| 1 | `1` | **Port** (as defined in UN/ECE Recommendation 16) |
+| 2 | `2` | Rail terminal |
+| 3 | `3` | Road terminal |
+| 4 | `4` | Airport |
+| 5 | `5` | Postal exchange office |
+| 6 | `6` | Multimodal functions, ICDs |
+| 7 | `7` | Fixed transport (e.g., oil platform) |
+| 8 | `B` | Border crossing |
+
+**For sea routing, filter locations where position 1 = `1` (seaports only).**
+
+Examples:
+- `12345---` = Port + Rail + Road + Airport + Postal (major hub like Rotterdam, Shanghai)
+- `1-------` = Port only (small seaport)
+- `---4----` = Airport only (NOT a seaport, exclude)
+- `1-3-----` = Port + Road terminal
+
+#### 🌍 Coordinate Format Parsing
+
+Coordinates are in the format: `DDMMH DDDMMH` where:
+- `DD` or `DDD` = degrees (2 digits for lat, 3 for lon)
+- `MM` = minutes
+- `H` = hemisphere (`N`/`S` for latitude, `E`/`W` for longitude)
+
+**Parsing implementation:**
+
+```java
+public class UnlocodeCoordinateParser {
+    /**
+     * Parse UN/LOCODE coordinate format to decimal degrees.
+     * Format: "DDMMH DDDMMH" (e.g., "5155N 00430E" → 51.9167, 4.5)
+     * 
+     * @param coordString The coordinate string from UN/LOCODE CSV
+     * @return Optional containing GHPoint, empty if parsing fails or coordinates missing
+     */
+    public static Optional<GHPoint> parse(String coordString) {
+        if (coordString == null || coordString.isBlank()) {
+            return Optional.empty();
+        }
+        
+        String[] parts = coordString.trim().split("\\s+");
+        if (parts.length != 2) {
+            return Optional.empty();
+        }
+        
+        try {
+            double lat = parseLatitude(parts[0]);   // e.g., "5155N"
+            double lon = parseLongitude(parts[1]);  // e.g., "00430E"
+            return Optional.of(new GHPoint(lat, lon));
+        } catch (NumberFormatException | StringIndexOutOfBoundsException e) {
+            return Optional.empty();
+        }
+    }
+    
+    private static double parseLatitude(String latStr) {
+        // Format: DDMMH (e.g., "5155N", "3114S")
+        int degrees = Integer.parseInt(latStr.substring(0, 2));
+        int minutes = Integer.parseInt(latStr.substring(2, 4));
+        char hemisphere = latStr.charAt(4);
+        
+        double decimal = degrees + (minutes / 60.0);
+        return hemisphere == 'S' ? -decimal : decimal;
+    }
+    
+    private static double parseLongitude(String lonStr) {
+        // Format: DDDMMH (e.g., "00430E", "12129W")
+        int degrees = Integer.parseInt(lonStr.substring(0, 3));
+        int minutes = Integer.parseInt(lonStr.substring(3, 5));
+        char hemisphere = lonStr.charAt(5);
+        
+        double decimal = degrees + (minutes / 60.0);
+        return hemisphere == 'W' ? -decimal : decimal;
+    }
+}
+```
+
+#### ✅ Status Code Filtering
+
+Use the **Status** column (index 7) to filter reliable entries:
+
+| Status | Meaning | Include in Port Table? |
+|--------|---------|----------------------|
+| `AA` | Approved by government agency | ✅ Yes |
+| `AC` | Approved by Customs Authority | ✅ Yes |
+| `AF` | Approved by facilitation body | ✅ Yes |
+| `AI` | Adopted by IATA/ECLAC | ✅ Yes |
+| `AS` | Approved by standardisation body | ✅ Yes |
+| `RL` | Recognised location (verified) | ✅ Yes |
+| `RN` | Request from national sources | ❌ No |
+| `RQ` | Request under consideration | ❌ No |
+| `RR` | Request rejected | ❌ No |
+| `QQ` | Not verified since date | ❌ No |
+| `XX` | To be removed | ❌ No |
+
+#### 🔄 Change Indicator Handling
+
+The **Ch** column (index 0) indicates entry status:
+
+| Indicator | Meaning | Action |
+|-----------|---------|--------|
+| ` ` (empty) | Unchanged | Keep |
+| `+` | Newly added | Include |
+| `#` | Name changed | Update name |
+| `\|` | Entry modified | Update |
+| `=` | Reference entry | Include (alias) |
+| `X` | To be removed | Exclude |
+| `!` | Duplicate IATA (US) | Review |
+
+#### 📦 Port Data Loader Implementation
+
+```java
+public class UnlocodePortLoader {
+    private static final int COL_CHANGE = 0;
+    private static final int COL_COUNTRY = 1;
+    private static final int COL_LOCATION = 2;
+    private static final int COL_NAME = 3;
+    private static final int COL_NAME_ASCII = 4;
+    private static final int COL_SUBDIV = 5;
+    private static final int COL_FUNCTION = 6;
+    private static final int COL_STATUS = 7;
+    private static final int COL_DATE = 8;
+    private static final int COL_IATA = 9;
+    private static final int COL_COORDINATES = 10;
+    
+    private static final Set<String> VALID_STATUSES = Set.of(
+        "AA", "AC", "AF", "AI", "AS", "RL"
+    );
+    
+    /**
+     * Load seaports from UN/LOCODE CSV files.
+     * Filters to include only:
+     * - Locations with Function position 1 = '1' (ports)
+     * - Locations with valid status codes
+     * - Locations with valid coordinates
+     * - Locations not marked for removal
+     */
+    public List<Port> loadSeaports(Path... csvFiles) throws IOException {
+        List<Port> ports = new ArrayList<>();
+        
+        for (Path csvFile : csvFiles) {
+            try (BufferedReader reader = Files.newBufferedReader(csvFile, StandardCharsets.UTF_8)) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    parseAndAddPort(line, ports);
+                }
+            }
+        }
+        
+        return ports;
+    }
+    
+    private void parseAndAddPort(String line, List<Port> ports) {
+        String[] cols = parseCSVLine(line);
+        if (cols.length < 11) return;
+        
+        // Skip entries marked for removal
+        String changeIndicator = cols[COL_CHANGE].trim();
+        if ("X".equals(changeIndicator)) return;
+        
+        // Skip country header rows (location code is empty)
+        String locationCode = cols[COL_LOCATION].trim();
+        if (locationCode.isEmpty()) return;
+        
+        // Filter: Must be a seaport (Function position 1 = '1')
+        String function = cols[COL_FUNCTION].trim();
+        if (function.isEmpty() || function.charAt(0) != '1') return;
+        
+        // Filter: Must have valid status
+        String status = cols[COL_STATUS].trim();
+        if (!VALID_STATUSES.contains(status)) return;
+        
+        // Filter: Must have coordinates
+        Optional<GHPoint> coordOpt = UnlocodeCoordinateParser.parse(cols[COL_COORDINATES]);
+        if (coordOpt.isEmpty()) return;
+        
+        GHPoint coord = coordOpt.get();
+        String countryCode = cols[COL_COUNTRY].trim();
+        String unlocode = countryCode + locationCode;  // e.g., "NLRTM"
+        String name = cols[COL_NAME_ASCII].trim();     // Use ASCII name for consistency
+        String subdivision = cols[COL_SUBDIV].trim();
+        
+        ports.add(new Port(
+            unlocode,
+            name,
+            countryCode,
+            subdivision,
+            coord.getLat(),
+            coord.getLon(),
+            function,
+            status
+        ));
+    }
+    
+    private String[] parseCSVLine(String line) {
+        // Handle quoted fields and commas within quotes
+        List<String> fields = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inQuotes = false;
+        
+        for (char c : line.toCharArray()) {
+            if (c == '"') {
+                inQuotes = !inQuotes;
+            } else if (c == ',' && !inQuotes) {
+                fields.add(current.toString());
+                current = new StringBuilder();
+            } else {
+                current.append(c);
+            }
+        }
+        fields.add(current.toString());
+        
+        return fields.toArray(new String[0]);
+    }
+}
+```
+
+#### 🗂️ Port Domain Object
+
+```java
+public class Port {
+    private final String unlocode;      // e.g., "NLRTM", "CNSHA"
+    private final String name;          // e.g., "Rotterdam", "Shanghai"
+    private final String countryCode;   // e.g., "NL", "CN"
+    private final String subdivision;   // e.g., "ZH" (Zuid-Holland)
+    private final double lat;
+    private final double lon;
+    private final String function;      // e.g., "12345---"
+    private final String status;        // e.g., "AF", "AI"
+    
+    // Constructor and getters...
+    
+    /**
+     * Check if this is a major port (multiple transport modes).
+     */
+    public boolean isMajorPort() {
+        // Major ports have multiple functions (port + rail + road, etc.)
+        return function.chars().filter(c -> c != '-').count() >= 3;
+    }
+    
+    /**
+     * Check if port has rail connection.
+     */
+    public boolean hasRailConnection() {
+        return function.length() > 1 && function.charAt(1) == '2';
+    }
+    
+    /**
+     * Check if port has road connection.
+     */
+    public boolean hasRoadConnection() {
+        return function.length() > 2 && function.charAt(2) == '3';
+    }
+}
+```
+
+#### 📊 Expected Port Statistics
+
+After filtering the 2024-2 UN/LOCODE data:
+
+| Metric | Approximate Value |
+|--------|-------------------|
+| Total UN/LOCODE entries | ~100,000+ |
+| Entries with Function position 1 = '1' | ~15,000 |
+| Seaports with valid coordinates | ~12,000 |
+| Seaports with AA/AF/AI/AS/RL status | ~10,000 |
+| Major ports (3+ functions) | ~3,000 |
+
+#### 🔗 Subdivision Codes
+
+The `SubdivisionCodes.csv` file maps ISO 3166-2 codes to names:
+
+```csv
+"NL","ZH","Zuid-Holland","Province"
+"CN","SH","Shanghai","Municipality"
+"US","CA","California","State"
+```
+
+Use this for display purposes and regional grouping.
+
+#### 📋 Example Port Entries
+
+| UNLOCODE | Name | Function | Coordinates | Status |
+|----------|------|----------|-------------|--------|
+| `NLRTM` | Rotterdam | `12345---` | 51.917°N, 4.500°E | AF |
+| `CNSHA` | Shanghai | `12345---` | 31.233°N, 121.483°E | AS |
+| `AEJEA` | Jebel Ali | `1-------` | — | QQ |
+| `USNYC` | New York | `12345---` | 40.717°N, 74.000°W | AI |
+| `SGSIN` | Singapore | `12345---` | 1.283°N, 103.850°E | AI |
 
 ---
 
@@ -664,17 +992,35 @@ User Coordinate → [Stage 1: Port Snapping] → POL/POD (UN/LOCODE) → [Stage 
 
 ##### 📦 Reference Data Required
 
-Create/import a `ports` table (authoritative source):
+Load ports from the bundled UN/LOCODE CSV files (see "UN/LOCODE Port Data" section above):
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `unlocode` | VARCHAR(5) | UN/LOCODE identifier (e.g., `NLRTM`) |
-| `name` | VARCHAR | Port name |
-| `country` | VARCHAR(2) | ISO country code |
-| `lat` | DOUBLE | Port latitude |
-| `lon` | DOUBLE | Port longitude |
-| `geom` | GEOMETRY | Point geometry (SRID 4326) |
-| `active` | BOOLEAN | Exclude deprecated ports |
+```
+unlocode-data/
+├── 2024-2 UNLOCODE CodeListPart1.csv
+├── 2024-2 UNLOCODE CodeListPart2.csv
+├── 2024-2 UNLOCODE CodeListPart3.csv
+└── 2024-2 SubdivisionCodes.csv
+```
+
+Use the `UnlocodePortLoader` to create a `ports` table (in-memory or database):
+
+| Column | Type | Description | UN/LOCODE Source Column |
+|--------|------|-------------|-------------------------|
+| `unlocode` | VARCHAR(5) | UN/LOCODE identifier (e.g., `NLRTM`) | Country + Location (cols 1+2) |
+| `name` | VARCHAR | Port name (ASCII) | NameWoDiacritics (col 4) |
+| `country` | VARCHAR(2) | ISO country code | Country (col 1) |
+| `subdivision` | VARCHAR(3) | ISO 3166-2 subdivision | SubDiv (col 5) |
+| `lat` | DOUBLE | Port latitude | Parsed from Coordinates (col 10) |
+| `lon` | DOUBLE | Port longitude | Parsed from Coordinates (col 10) |
+| `function` | VARCHAR(8) | Function codes | Function (col 6) |
+| `status` | VARCHAR(2) | Entry status | Status (col 7) |
+| `active` | BOOLEAN | Exclude deprecated ports | Status ≠ 'XX', 'RR', 'RQ' |
+
+**Filtering applied during load:**
+- Function position 1 = `1` (seaports only)
+- Status in `['AA', 'AC', 'AF', 'AI', 'AS', 'RL']`
+- Valid coordinates present
+- Not marked for removal (`Ch` ≠ `X`)
 
 ##### 🔍 Snapping Algorithm (Applies to BOTH POL and POD)
 
@@ -824,13 +1170,23 @@ public class SeaNodeSnapper {
 
 ---
 
-#### ✅ Pre-Routing Validation
+#### ✅ Pre-Routing Validation (OPTIONAL)
+
+> **⚠️ SCOPE CLARIFICATION:** This validator is for **optional input validation only**.
+> It is NOT part of the routing algorithm. See "Build-Time vs Runtime Responsibilities" section.
+> If coordinate validation is disabled (`validate_coordinates: false`), this code path is skipped entirely.
 
 Validate coordinates before port snapping:
 
 ```java
+/**
+ * Optional coordinate validator for early rejection of invalid inputs.
+ * 
+ * NOTE: All land geometry checks are performed at build time or for validation only.
+ * Runtime routing NEVER queries land geometry.
+ */
 public class PortCoordinateValidator {
-    private final Geometry landGeometry;  // Natural Earth land polygons
+    private final Geometry landGeometry;  // Natural Earth land polygons (lazy-loaded)
     private final GeometryFactory gf = new GeometryFactory();
     
     public ValidationResult validate(double lat, double lon) {
@@ -945,7 +1301,8 @@ sea:
 
 #### 🏗️ Architecture Notes
 
-- **Ports table**: Must be populated from authoritative UN/LOCODE source before sea routing is enabled
+- **Ports table**: Loaded from bundled UN/LOCODE CSV files (`unlocode-data/2024-2 UNLOCODE CodeListPart*.csv`) using `UnlocodePortLoader` at application startup
+- **Port data version**: 2024-2 release (~10,000 active seaports with valid coordinates after filtering)
 - **Land geometry persistence**: The `SeaLaneGraphBuilder` exports land geometry to `graph-cache/sea/land_geometry.wkb` for runtime validation
 - **Chokepoint metadata**: Persisted to `graph-cache/sea/chokepoint_metadata.json` at build time
 - **Lazy loading**: Load land geometry only when first sea routing request is received
@@ -1051,6 +1408,55 @@ public MatrixResource(MetricRegistry metrics, ...) {
 
 ---
 
+### 6.5️⃣ Build-Time vs Runtime Responsibilities (CRITICAL SCOPE CLARIFICATION)
+
+The implementation MUST enforce the following separation of concerns:
+
+#### 🏗️ Build-Time Responsibilities (Graph Builder)
+
+| Responsibility | Component | When |
+|----------------|-----------|------|
+| Land geometry point-in-polygon filtering | `SeaLaneGraphBuilder` | Graph build |
+| Edge–land intersection rejection | `SeaLaneGraphBuilder` | Graph build |
+| Chokepoint node tagging | `SeaLaneGraphBuilder` | Graph build |
+| Antimeridian handling in KNN | `SeaLaneGraphBuilder` | Graph build |
+| Connectivity validation | `SeaLaneGraphBuilder` | Graph build |
+| Graph persistence | `SeaLaneGraphBuilder` | Graph build |
+
+#### ⚡ Runtime Responsibilities (Routing)
+
+| Responsibility | Component | When |
+|----------------|-----------|------|
+| Graph traversal | GraphHopper runtime | Query time |
+| Scenario-based chokepoint exclusion | `ChokepointAwareEdgeFilter` | Query time |
+| Distance/time computation | GraphHopper routing | Query time |
+| Lead-time calculation | `MatrixResource` | Query time |
+| Port snapping (Stage 1 & 2) | `UnlocodePortSnapper`, `SeaNodeSnapper` | Query time |
+| Caching & metrics | `MatrixResource` | Query time |
+| Optional coordinate validation | `PortCoordinateValidator` | Query time (if enabled) |
+
+#### 📜 Mandatory Documentation Rule
+
+The following statement MUST be included **verbatim** in code comments and documentation:
+
+```
+All land geometry checks are performed at build time or for validation only.
+Runtime routing NEVER queries land geometry.
+```
+
+#### 🚫 Forbidden at Runtime (ROUTING PATH)
+
+- ❌ JTS geometry intersection checks during route computation
+- ❌ Land mask queries during graph traversal
+- ❌ Coastline or polygon access during `calcPath()` execution
+- ❌ Any `Geometry.contains()` or `Geometry.intersects()` in hot routing path
+
+> **Exception:** `PortCoordinateValidator` MAY use land geometry for **optional input validation**
+> (before routing begins), but this is NOT part of the routing algorithm itself.
+> If validation is disabled, no land geometry is accessed.
+
+---
+
 ### 7️⃣ Automated Testing (REQUIRED)
 
 #### 🧪 Unit Tests
@@ -1111,7 +1517,9 @@ Follow the pattern in DEVELOPER_GUIDE.md for testing with custom OSM data.
    - **Trans-Pacific route does NOT detour via Suez/Panama**
    - **Chokepoint routes use densified local waypoints**
    - **Suez exclusion routes via Cape of Good Hope**
-   - **Suez exclusion increases distance significantly (>5000 nm difference)**
+   - **Suez exclusion increases distance significantly: `distance_closed > distance_open * 1.15`**
+     - Use relative assertion (REROUTE_FACTOR ≥ 1.15), NOT absolute nm values
+     - This prevents test brittleness when grid resolution changes
 
 #### ⚡ Performance Test
 
@@ -1127,8 +1535,32 @@ These tests MUST pass or the build is considered failed:
 |------|-------|-----------|----------|
 | Pacific connectivity | Tokyo ↔ Los Angeles | None | Route exists, crosses dateline |
 | Baseline Asia-Europe | Shanghai ↔ Rotterdam | None | Route via Suez |
-| Suez closure | Shanghai ↔ Rotterdam | `excluded=["SUEZ"]` | Route via Cape, +5000nm |
+| Suez closure | Shanghai ↔ Rotterdam | `excluded=["SUEZ"]` | Route via Cape, `distance_closed > distance_open * 1.15` |
 | Invalid exclusion | Shanghai ↔ Rotterdam | `excluded=["SUEZ","CAPE_GOOD_HOPE"]` | `NO_ROUTE_AVAILABLE` error |
+
+#### 📐 Distance Assertion Rules (ANTI-FLAKY TESTS)
+
+**REQUIRED:** All distance-based assertions MUST be **relative**, not absolute.
+
+```java
+// ✅ CORRECT: Relative assertion
+assertTrue(distanceClosed > distanceOpen * REROUTE_FACTOR);
+where REROUTE_FACTOR >= 1.15
+
+// ✅ ACCEPTABLE: Geodesic baseline
+assertTrue(distanceClosed > haversineDistance * DETOUR_FACTOR);
+where DETOUR_FACTOR >= 1.30
+
+// ❌ FORBIDDEN: Absolute distance
+assertTrue(distanceClosed - distanceOpen > 5000); // BRITTLE!
+```
+
+**Rationale:** Absolute thresholds break when:
+- Waypoint density changes
+- Chokepoint densification is adjusted
+- Graph resolution improves
+
+Relative assertions express intent ("rerouted paths must be meaningfully longer") without hard-coding geography-specific constants.
 
 ---
 
@@ -1198,6 +1630,8 @@ These tests MUST pass or the build is considered failed:
 - ❌ Single point of failure chokepoints (must have alternatives)
 - ❌ Silent fallback when chokepoint exclusion is requested
 - ❌ Skipping connectivity validation at build time
+- ❌ **Land geometry queries during routing** (JTS checks in hot path)
+- ❌ **Absolute distance thresholds in tests** (use relative assertions)
 
 ---
 
@@ -1226,6 +1660,9 @@ Key files to understand before implementation:
 | `Chokepoint.java` | Domain object for chokepoint |
 | `ChokepointAwareEdgeFilter.java` | EdgeFilter that excludes chokepoint nodes |
 | `SeaLaneGraphBuilder.java` | Offline CLI to build sea graph |
+| `UnlocodePortLoader.java` | Loads seaports from UN/LOCODE CSV files |
+| `UnlocodeCoordinateParser.java` | Parses UN/LOCODE coordinate format to decimal degrees |
+| `Port.java` | Domain object for UN/LOCODE port data |
 | `UnlocodePortSnapper.java` | Snaps coordinates to UN/LOCODE ports |
 | `SeaNodeSnapper.java` | Snaps ports to sea graph nodes |
 | `devtools/graphhopper-build/sea-config.yml` | Sea routing config |
@@ -1303,7 +1740,7 @@ if (!cacheVersion.equals(expectedVersion)) {
 ---
 
 ## 🎯 Goal
-
+ 
 Deliver a **globally correct, scenario-aware, enterprise-grade** sea routing solution that:
 
 - ✅ Models real-world chokepoint redundancy (Suez closure → Cape route)
@@ -1325,5 +1762,13 @@ If any requirement in the following sections is skipped, weakened, or partially 
 2. Chokepoints as Controllable Features
 3. Build Artifacts & Runtime Metrics
 4. Assumed System Architecture
+5. Build-Time vs Runtime Responsibilities
+
+Additionally, the implementation is **INVALID** if:
+
+- ❌ Any test uses **absolute distance thresholds** (e.g., ">5000 nm")
+  - Use relative assertions: `distance_closed > distance_open * 1.15`
+- ❌ **Runtime routing accesses land geometry** (JTS intersection checks in hot path)
+  - All land geometry checks MUST be at build time or optional validation only
 
 ## 🚨 DO NOT DEVIATE FROM THIS SPEC 🚨
