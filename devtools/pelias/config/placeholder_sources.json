@@ -1,0 +1,18 @@
+{
+  "datasources": [
+    {
+      "name": "whosonfirst",
+      "type": "sqlite",
+      "files": [
+        "/data/whosonfirst/whosonfirst-latest.db"
+      ]
+    },
+    {
+      "name": "custom",
+      "type": "csv",
+      "files": [
+        "/data/custom.csv"
+      ]
+    }
+  ]
+}

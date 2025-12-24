@@ -1,0 +1,190 @@
+version: "3.9"
+
+networks:
+  pelias-net:
+    driver: bridge
+
+volumes:
+  pelias_esdata:
+  pelias_minio_data:
+
+services:
+  elasticsearch:
+    container_name: pelias-elasticsearch
+    image: pelias/elasticsearch:7.17.0
+    environment:
+      ES_JAVA_OPTS: ${ES_JAVA_OPTS}
+      discovery.type: single-node
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65535
+        hard: 65535
+    volumes:
+      - pelias_esdata:/usr/share/elasticsearch/data
+      - ./config/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
+      - ./config:/config:ro
+      - ./data:/data
+      - ../../osm-data:/osm-data:ro
+    networks:
+      - pelias-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+
+  pelias-api:
+    image: pelias/api:latest
+    environment:
+      PELIAS_CONFIG: /config/pelias.json
+    volumes:
+      - ./config/pelias.json:/config/pelias.json:ro
+      - ./config:/config:ro
+      - ./data:/data
+      - ../../osm-data:/osm-data:ro
+    ports:
+      - "4000:4000"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      pelias-libpostal:
+        condition: service_healthy
+      pelias-pip-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://pelias-api:4000/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    networks:
+      - pelias-net
+    restart: unless-stopped
+
+  pelias-libpostal:
+    image: pelias/libpostal-service:latest
+    volumes:
+      - ./config:/config:ro
+      - ./data:/data
+      - ../../osm-data:/osm-data:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://pelias-libpostal:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    networks:
+      - pelias-net
+    restart: unless-stopped
+
+  pelias-pip-service:
+    image: pelias/pip-service:latest
+    volumes:
+      - ./config:/config:ro
+      - ./data:/data
+      - ../../osm-data:/osm-data:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://pelias-pip-service:4200/"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    networks:
+      - pelias-net
+    restart: unless-stopped
+
+  pelias-placeholder:
+    image: pelias/placeholder:latest
+    environment:
+      PELIAS_CONFIG: /config/pelias.json
+    volumes:
+      - ./config/placeholder_sources.json:/config/placeholder_sources.json:ro
+      - ./config:/config:ro
+      - ./data:/data
+      - ../../osm-data:/osm-data:ro
+    networks:
+      - pelias-net
+    restart: unless-stopped
+
+  pelias-interpolation:
+    image: pelias/interpolation:latest
+    environment:
+      PELIAS_CONFIG: /config/pelias.json
+    volumes:
+      - ./config/interpolation_sources.json:/config/interpolation_sources.json:ro
+      - ./config:/config:ro
+      - ./data:/data
+      - ../../osm-data:/osm-data:ro
+    networks:
+      - pelias-net
+    restart: unless-stopped
+
+  pelias-whosonfirst:
+    image: pelias/whosonfirst:latest
+    profiles: ["import"]
+    environment:
+      PELIAS_CONFIG: /config/pelias.json
+    volumes:
+      - ./config:/config:ro
+      - ./data:/data
+      - ../../osm-data:/osm-data:ro
+    networks:
+      - pelias-net
+
+  pelias-openaddresses:
+    image: pelias/openaddresses:latest
+    profiles: ["import"]
+    environment:
+      PELIAS_CONFIG: /config/pelias.json
+    volumes:
+      - ./config:/config:ro
+      - ./data:/data
+      - ../../osm-data:/osm-data:ro
+    networks:
+      - pelias-net
+
+  pelias-osm:
+    image: pelias/osm:latest
+    profiles: ["import"]
+    environment:
+      PELIAS_CONFIG: /config/pelias.json
+    volumes:
+      - ./config:/config:ro
+      - ./data:/data
+      - ../../osm-data:/osm-data:ro
+    networks:
+      - pelias-net
+
+  pelias-csv-importer:
+    image: pelias/csv-importer:latest
+    profiles: ["import"]
+    environment:
+      PELIAS_CONFIG: /config/pelias.json
+      PELIAS_CSV_FILENAME: /data/custom.csv
+    volumes:
+      - ./config:/config:ro
+      - ./data:/data
+      - ./data/custom_locations.csv:/data/custom.csv:ro
+      - ../../osm-data:/osm-data:ro
+    networks:
+      - pelias-net
+
+  minio:
+    image: minio/minio:latest
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - pelias_minio_data:/data
+      - ./config:/config:ro
+      - ./data:/data
+      - ../../osm-data:/osm-data:ro
+    networks:
+      - pelias-net
+    restart: unless-stopped

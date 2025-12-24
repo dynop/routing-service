@@ -1,0 +1,19 @@
+# Large OSM data files
+osm-data/**/*.osm.pbf
+
+# Graph cache files (can be regenerated)
+devtools/graphhopper-build/graph-cache/
+
+# Build artifacts
+matrix-extension/target/
+
+# IDE settings (optional - comment out if you want to keep)
+# .vscode/
+
+# Pelias data that can be re-downloaded
+devtools/pelias/data/downloads/
+devtools/pelias/data/openaddresses/
+devtools/pelias/data/whosonfirst/
+
+# Logs
+devtools/pelias/logs/

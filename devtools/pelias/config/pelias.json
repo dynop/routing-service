@@ -1,0 +1,56 @@
+{
+  "api": {
+    "express": {
+      "cors": {
+        "maxAge": 86400
+      }
+    },
+    "default_language": "en",
+    "services": {
+      "pip": { "url": "http://pelias-pip-service:4200" },
+      "libpostal": { "url": "http://pelias-libpostal:8080" },
+      "placeholder": { "url": "http://pelias-placeholder:4100" },
+      "interpolation": { "url": "http://pelias-interpolation:4300" }
+    }
+  },
+  "imports": {
+    "blacklist": "/config/blacklist.json",
+    "whosonfirst": {
+      "datapath": "/data/whosonfirst",
+      "importPostalcodes": false,
+      "regions": ["${PELIAS_REGION_CODE}"]
+    },
+    "openaddresses": {
+      "datapath": "/data/openaddresses",
+      "files": []
+    },
+    "osm": {
+      "filename": "/osm-data/europe/europe-latest.osm.pbf",
+      "adminLookup": true
+    },
+    "csv": {
+      "filename": "/data/custom.csv",
+      "id": "id",
+      "name": "name",
+      "lat": "latitude",
+      "lon": "longitude"
+    }
+  },
+  "elasticsearch": {
+    "host": "elasticsearch",
+    "port": 9200,
+    "index_name": "pelias",
+    "settings": {
+      "index": {
+        "number_of_shards": 1,
+        "number_of_replicas": 0
+      }
+    }
+  },
+  "interpolation": {
+    "datasources": "/config/interpolation_sources.json"
+  },
+  "placeholder": {
+    "datasources": "/config/placeholder_sources.json"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "datasources": [
+    {
+      "name": "oa",
+      "type": "address",
+      "files": [
+        "/data/openaddresses/latest.tar.gz"
+      ]
+    },
+    {
+      "name": "custom",
+      "type": "address",
+      "files": [
+        "/data/custom.csv"
+      ]
+    }
+  ]
+}

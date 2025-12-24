@@ -1,0 +1,519 @@
+dynop — Pelias Geocoding Service (Self-Hosted)
+GitHub Copilot Implementation Prompt
+Authoritative Specification v1.6 (Final Version — Copilot-Safe)
+
+You are GitHub Copilot acting as a Senior DevOps Engineer.
+Your task: generate a complete, production-ready Pelias self-hosting stack for the dynop GEO subsystem.
+
+This specification is the single source of truth.
+Follow it exactly.
+No deviations.
+No inferred behavior.
+No retries with alternatives.
+
+────────────────────────────────────────────────────────────────────────────
+
+1. DIRECTORY STRUCTURE
+
+Create the following tree under the existing directory:
+
+GEO/devtools/pelias/
+├── docker-compose.yml
+├── .env.example
+├── README.md
+├── Makefile
+├── docs/
+│   ├── architecture.md
+│   ├── testing.md
+│   └── troubleshooting.md
+├── tests/
+│   ├── smoke_test.sh
+│   └── integration_test.py
+├── config/
+│   ├── pelias.json
+│   ├── elasticsearch.yml
+│   ├── blacklist.json
+│   ├── placeholder_sources.json
+│   └── interpolation_sources.json
+└── data/
+    ├── custom_locations.csv
+    └── .gitkeep
+
+
+The existing OSM dataset remains here:
+
+GEO/osm-data/<region>/<file>.osm.pbf
+
+
+Pelias must use this path.
+
+────────────────────────────────────────────────────────────────────────────
+
+2. DOCKER COMPOSE REQUIREMENTS
+
+File: GEO/devtools/pelias/docker-compose.yml
+
+2.1 Compose Version
+
+Use Docker Compose v2 syntax.
+All commands must use:
+
+docker compose
+
+2.2 Global Network
+networks:
+  pelias-net:
+    driver: bridge
+
+
+All services must attach to pelias-net.
+
+2.3 Global Healthcheck
+
+Every service with a healthcheck must use:
+
+interval: 10s
+timeout: 5s
+retries: 30
+start_period: 60s
+
+2.4 Restart Policies
+restart: unless-stopped
+
+
+applies only to core services.
+Importers must not have any restart policy.
+
+2.5 Required Volume Mounts
+
+Relative path from GEO/devtools/pelias:
+
+./config:/config:ro
+./data:/data
+../../osm-data:/osm-data:ro
+
+2.6 Services
+1. elasticsearch
+
+Service name: elasticsearch
+
+Image: pelias/elasticsearch:7.17.0
+
+Container name: pelias-elasticsearch
+
+Environment:
+
+discovery.type=single-node
+
+Heap from .env using ES_JAVA_OPTS
+
+Volumes:
+
+pelias_esdata:/usr/share/elasticsearch/data
+
+./config/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
+
+Ulimits:
+
+memlock:-1
+
+nofile:65535
+
+Healthcheck:
+
+test: ["CMD", "curl", "-f", "http://localhost:9200"]
+
+
+Restart policy:
+
+restart: unless-stopped
+
+2. pelias-api
+
+Image: pelias/api:latest
+
+Environment:
+
+PELIAS_CONFIG=/config/pelias.json
+
+Volumes:
+
+./config/pelias.json:/config/pelias.json:ro
+
+../../osm-data:/osm-data:ro
+
+Ports:
+
+4000:4000
+
+Depends_on:
+
+elasticsearch
+
+pelias-libpostal
+
+pelias-pip-service
+
+Healthcheck:
+
+test: ["CMD", "curl", "-f", "http://pelias-api:4000/v1/health"]
+
+
+Restart policy: unless-stopped
+
+3. pelias-libpostal
+
+Image: pelias/libpostal-service:latest
+
+Healthcheck:
+
+test: ["CMD", "curl", "-f", "http://pelias-libpostal:8080/"]
+
+
+Restart policy: unless-stopped
+
+4. pelias-pip-service
+
+Image: pelias/pip-service:latest
+
+Healthcheck:
+
+test: ["CMD", "curl", "-f", "http://pelias-pip-service:4200/"]
+
+
+Restart policy: unless-stopped
+
+5. pelias-placeholder
+
+Image: pelias/placeholder:latest
+
+Volumes:
+
+./config/placeholder_sources.json:/config/placeholder_sources.json:ro
+
+Restart policy: unless-stopped
+
+6. pelias-interpolation
+
+Image: pelias/interpolation:latest
+
+Volumes:
+
+./config/interpolation_sources.json:/config/interpolation_sources.json:ro
+
+Restart policy: unless-stopped
+
+7–10: Importers (profile: ["import"])
+
+Each importer must:
+
+Use:
+
+profiles: ["import"]
+
+
+Mount:
+
+./config:/config:ro
+./data:/data
+../../osm-data:/osm-data:ro
+
+
+Not expose ports
+
+Not specify restart
+
+Importers:
+
+pelias-whosonfirst
+
+pelias-openaddresses
+
+pelias-osm
+
+pelias-csv-importer
+
+CSV: /data/custom.csv from ./data/custom_locations.csv
+
+11. MinIO Cache (Optional but Fully Wired)
+
+Image: minio/minio:latest
+
+Command:
+
+server /data
+
+
+Volumes:
+
+pelias_minio_data:/data
+
+Environment:
+
+MINIO_ROOT_USER
+
+MINIO_ROOT_PASSWORD
+
+Ports: None exposed by default
+
+Document in README how to temporarily open port 9001.
+
+2.7 Named Volumes
+volumes:
+  pelias_esdata:
+  pelias_minio_data:
+
+
+────────────────────────────────────────────────────────────────────────────
+
+3. CONFIG FILE REQUIREMENTS
+pelias.json
+
+Must be valid JSON.
+
+Mandatory structure:
+
+{
+  "api": {
+    "express": {
+      "cors": {
+        "maxAge": 86400
+      }
+    },
+    "default_language": "en",
+    "services": {
+      "pip": { "url": "http://pelias-pip-service:4200" },
+      "libpostal": { "url": "http://pelias-libpostal:8080" },
+      "placeholder": { "url": "http://pelias-placeholder:4100" },
+      "interpolation": { "url": "http://pelias-interpolation:4300" }
+    }
+  },
+  "imports": {
+    "whosonfirst": {
+      "datapath": "/data/whosonfirst",
+      "importPostalcodes": false,
+      "regions": ["<region_code_from_env>"]
+    },
+    "openaddresses": {
+      "datapath": "/data/openaddresses",
+      "files": []
+    },
+    "osm": {
+      "filename": "/osm-data/europe/europe-latest.osm.pbf",
+      "adminLookup": true
+    },
+    "csv": {
+      "filename": "/data/custom.csv",
+      "id": "id",
+      "name": "name",
+      "lat": "latitude",
+      "lon": "longitude"
+    }
+  },
+  "elasticsearch": {
+    "host": "elasticsearch",
+    "port": 9200,
+    "index_name": "pelias",
+    "settings": {
+      "index": {
+        "number_of_shards": 1,
+        "number_of_replicas": 0
+      }
+    }
+  },
+  "interpolation": {
+    "datasources": "/config/interpolation_sources.json"
+  },
+  "placeholder": {
+    "datasources": "/config/placeholder_sources.json"
+  }
+}
+
+
+────────────────────────────────────────────────────────────────────────────
+
+4. .env.example REQUIREMENTS
+
+The file must include:
+
+ES_HEAP_SIZE_GB=4
+ES_JAVA_OPTS=-Xms4g -Xmx4g
+
+PELIAS_REGION_CODE=de-be
+
+USE_MINIO=false
+MINIO_ROOT_USER=pelias
+MINIO_ROOT_PASSWORD=pelias-secret-password
+
+
+────────────────────────────────────────────────────────────────────────────
+
+5. MAKEFILE REQUIREMENTS
+bootstrap
+
+Create required folders
+
+Copy .env.example to .env if missing
+
+download
+
+Download WOF to ./data/whosonfirst/
+
+Download OA to ./data/openaddresses/
+
+Do not download or modify OSM
+
+Print the message:
+
+Using existing OSM dataset from GEO/osm-data/
+
+import-all
+
+Import order:
+
+pelias-whosonfirst
+
+pelias-openaddresses
+
+pelias-osm
+
+pelias-csv-importer
+
+Each invoked as:
+
+docker compose run --rm --profile import <service>
+
+import-csv
+
+Re-import custom CSV only.
+
+build
+
+Build placeholder and interpolation:
+
+docker compose build pelias-placeholder pelias-interpolation
+
+up
+
+Start only core services:
+
+docker compose up -d elasticsearch pelias-api pelias-libpostal pelias-pip-service pelias-placeholder pelias-interpolation
+
+down
+
+Stop stack.
+
+clean
+
+Remove ES index and named volumes.
+
+test
+
+Run smoke + integration tests.
+
+────────────────────────────────────────────────────────────────────────────
+
+6. README.md REQUIREMENTS
+
+Must include:
+
+Kernel requirement (mandatory)
+sudo sysctl -w vm.max_map_count=262144
+echo "vm.max_map_count=262144" | sudo tee /etc/sysctl.d/99-elasticsearch.conf
+
+Statement about OSM dataset
+Pelias uses the existing dynop OSM dataset located under:
+
+    GEO/osm-data/<region>/<file>.osm.pbf
+
+Quickstart
+make bootstrap
+make download
+make import-all
+make build
+make up
+./tests/smoke_test.sh
+
+MinIO console access
+docker compose port minio 9001
+
+
+────────────────────────────────────────────────────────────────────────────
+
+7. TEST REQUIREMENTS
+smoke_test.sh
+
+Must verify:
+
+/v1/health
+
+/v1/search?text=Berlin
+
+/v1/search?text=Distribution+Center
+
+Exit non-zero on failure.
+
+integration_test.py
+
+Must:
+
+Validate JSON schema
+
+Validate that /osm-data/europe/europe-latest.osm.pbf exists inside container
+
+Validate libpostal-based parsing
+
+Measure and print p95 latency
+
+Confirm ES index has >10,000 documents
+
+Confirm custom CSV entries appear in Pelias results
+
+────────────────────────────────────────────────────────────────────────────
+
+8. DOCS REQUIREMENTS
+architecture.md
+
+Describe request flow:
+
+Client → Pelias API → Libpostal → Elasticsearch → PIP → Placeholder → Interpolation → Response
+
+testing.md
+
+Explain smoke + integration tests and manual ES validation.
+
+troubleshooting.md
+
+Cover:
+
+Elasticsearch OOM
+
+Missing interpolation data
+
+Missing placeholder data
+
+vm.max_map_count
+
+"No results" debugging sequence
+
+────────────────────────────────────────────────────────────────────────────
+
+9. NON-NEGOTIABLE RULES
+
+Use the existing OSM dataset under GEO/osm-data/
+
+Do not download or duplicate OSM PBF files
+
+Use exact file paths as written
+
+All JSON/YAML must be valid
+
+All services must use network pelias-net
+
+docker compose up -d must produce a working Pelias instance
+
+Follow this specification exactly
+
+────────────────────────────────────────────────────────────────────────────
+
+END OF SPECIFICATION (v1.6)
