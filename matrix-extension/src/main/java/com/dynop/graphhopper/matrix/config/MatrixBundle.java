@@ -6,6 +6,12 @@ import com.dynop.graphhopper.matrix.api.MatrixResource.MatrixResourceBindings;
 import com.dynop.graphhopper.matrix.sea.*;
 import com.graphhopper.GraphHopper;
 import com.graphhopper.http.GraphHopperBundleConfiguration;
+import com.graphhopper.routing.ev.BooleanEncodedValue;
+import com.graphhopper.routing.ev.DecimalEncodedValue;
+import com.graphhopper.routing.util.EncodingManager;
+import com.graphhopper.storage.BaseGraph;
+import com.graphhopper.storage.index.LocationIndex;
+import com.graphhopper.storage.index.LocationIndexTree;
 import io.dropwizard.core.ConfiguredBundle;
 import io.dropwizard.core.setup.Bootstrap;
 import io.dropwizard.core.setup.Environment;
@@ -143,12 +149,82 @@ public class MatrixBundle implements ConfiguredBundle<GraphHopperBundleConfigura
             
             LOGGER.info(() -> "Sea graph found at " + seaGraphPath + ", loading...");
             
-            // Configure and load sea hopper
+            // Load the pre-built sea graph directly as a BaseGraph
+            // The sea graph was built with SeaLaneGraphBuilder which creates a BaseGraph
+            // and flushes it to disk using RAMDirectory. We need to load it the same way.
             GraphHopper seaHopper = new GraphHopper();
             seaHopper.setGraphHopperLocation(seaGraphLocation);
-            seaHopper.load();
             
-            LOGGER.info(() -> "Sea hopper loaded: " + seaHopper.getBaseGraph().getNodes() + " nodes");
+            // Add a ship profile BEFORE creating encoding manager
+            // Use custom weighting with a simple distance-based model
+            com.graphhopper.config.Profile shipProfile = new com.graphhopper.config.Profile("ship");
+            shipProfile.setWeighting("custom");
+            
+            // Create a simple custom model for distance-based routing
+            com.graphhopper.util.CustomModel customModel = new com.graphhopper.util.CustomModel();
+            customModel.setDistanceInfluence(100.0); // Pure distance-based routing
+            customModel.addToSpeed(com.graphhopper.json.Statement.If("true", com.graphhopper.json.Statement.Op.LIMIT, "100"));
+            
+            shipProfile.setCustomModel(customModel);
+            seaHopper.setProfiles(shipProfile);
+            
+            // Create the encoding manager matching what the builder used
+            BooleanEncodedValue accessEnc = com.graphhopper.routing.ev.VehicleAccess.create("car");
+            DecimalEncodedValue speedEnc = com.graphhopper.routing.ev.VehicleSpeed.create("car", 5, 5, false);
+            EncodingManager encodingManager = EncodingManager.start()
+                .add(accessEnc)
+                .add(speedEnc)
+                .build();
+            
+            // Load the base graph directly from disk (no .create(), just loadExisting)
+            BaseGraph baseGraph = new BaseGraph.Builder(encodingManager)
+                .setDir(new com.graphhopper.storage.RAMDirectory(seaGraphLocation, true))
+                .set3D(false)
+                .build();  // Use build() instead of create()
+            
+            baseGraph.loadExisting();
+            
+            // Inject the loaded graph and encoding manager into seaHopper using reflection
+            try {
+                java.lang.reflect.Field baseGraphField = GraphHopper.class.getDeclaredField("baseGraph");
+                baseGraphField.setAccessible(true);
+                baseGraphField.set(seaHopper, baseGraph);
+                
+                // Also inject the encoding manager
+                java.lang.reflect.Field encodingManagerField = GraphHopper.class.getDeclaredField("encodingManager");
+                encodingManagerField.setAccessible(true);
+                encodingManagerField.set(seaHopper, encodingManager);
+                
+                // Load or create the location index for spatial queries
+                // For sea graph with 5° grid (~555km spacing), we need a large search radius
+                LocationIndexTree locationIndex;
+                com.graphhopper.storage.RAMDirectory indexDir = new com.graphhopper.storage.RAMDirectory(seaGraphLocation, true);
+                if (Files.exists(seaGraphPath.resolve("location_index"))) {
+                    // Load existing location index
+                    locationIndex = new LocationIndexTree(baseGraph, indexDir);
+                    locationIndex.setMaxRegionSearch(512); // Very large search radius for coarse sea grid (5° = ~555km)
+                    if (!locationIndex.loadExisting()) {
+                        // If loading fails, prepare a new one
+                        locationIndex.prepareIndex();
+                    }
+                } else {
+                    // Create new location index
+                    locationIndex = new LocationIndexTree(baseGraph, indexDir);
+                    locationIndex.setMaxRegionSearch(512); // Very large search radius for coarse sea grid (5° = ~555km)
+                    locationIndex.prepareIndex();
+                }
+                
+                // Inject location index
+                java.lang.reflect.Field locationIndexField = GraphHopper.class.getDeclaredField("locationIndex");
+                locationIndexField.setAccessible(true);
+                locationIndexField.set(seaHopper, locationIndex);
+                
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to inject BaseGraph into GraphHopper", e);
+            }
+            
+            int nodeCount = baseGraph.getNodes();
+            LOGGER.info(() -> "Sea hopper loaded: " + nodeCount + " nodes");
             return seaHopper;
             
         } catch (Exception e) {

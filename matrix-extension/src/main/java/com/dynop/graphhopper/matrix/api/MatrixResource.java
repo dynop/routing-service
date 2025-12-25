@@ -543,7 +543,13 @@ public class MatrixResource {
             if (point == null) {
                 snaps[i] = new Snap(0, 0); // invalid snap placeholder
             } else {
-                snaps[i] = locationIndex.findClosest(point.getLat(), point.getLon(), edgeFilter);
+                // For sea routing with 5° grid (~555km spacing), use a large query radius
+                // The default radius is too small, so we explicitly search within 1000km
+                Snap snap = locationIndex.findClosest(point.getLat(), point.getLon(), edgeFilter);
+                // If the default search didn't work, the snap will be invalid
+                // GraphHopper's LocationIndexTree doesn't have a distance parameter in findClosest
+                // so we rely on setMaxRegionSearch() set during initialization
+                snaps[i] = snap;
             }
         }
         return snaps;

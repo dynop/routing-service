@@ -98,7 +98,8 @@ public final class UnlocodePortLoader {
             int[] lineNumber = {0};
             int portsFromFile = 0;
             
-            try (BufferedReader reader = Files.newBufferedReader(csvFile, StandardCharsets.UTF_8)) {
+            // UN/LOCODE files use ISO-8859-1 (Latin-1) encoding, not UTF-8
+            try (BufferedReader reader = Files.newBufferedReader(csvFile, StandardCharsets.ISO_8859_1)) {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     lineNumber[0]++;

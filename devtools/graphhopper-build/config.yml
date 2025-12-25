@@ -26,6 +26,12 @@ graphhopper:
   profiles_ch:
     - profile: truck
 
+  # Sea routing configuration
+  sea.graph.location: /app/graph-cache/sea
+  sea.ports.unlocode_data: /app/unlocode-data
+  sea.ports.snap_distance_km: 300
+  sea.landmask.shapefile: /app/natural-earth-data/ne_50m_land.shp
+
 # Dropwizard server configuration
 server:
   application_connectors:
