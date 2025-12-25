@@ -3,7 +3,7 @@ package com.dynop.graphhopper.matrix.api;
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.Timer;
-import com.dynop.graphhopper.matrix.config.RoutingEngineRegistry;
+import com.dynop.graphhopper.matrix.config.SeaHopperHolder;
 import com.dynop.graphhopper.matrix.sea.*;
 import com.graphhopper.GraphHopper;
 import com.graphhopper.config.Profile;
@@ -90,7 +90,7 @@ public class MatrixResource {
     private final Meter routeThroughput;
     
     // Sea routing components (nullable if sea routing is not configured)
-    private final RoutingEngineRegistry routingEngineRegistry;
+    private final GraphHopper seaHopper;
     private final ChokepointRegistry chokepointRegistry;
     private final UnlocodePortSnapper portSnapper;
 
@@ -98,9 +98,9 @@ public class MatrixResource {
     public MatrixResource(GraphHopper graphHopper,
                           @Named(MatrixResourceBindings.EXECUTOR_BINDING) ExecutorService executorService,
                           MetricRegistry metrics,
-                          @Nullable RoutingEngineRegistry routingEngineRegistry,
-                          @Nullable ChokepointRegistry chokepointRegistry,
-                          @Nullable UnlocodePortSnapper portSnapper) {
+                          SeaHopperHolder seaHopperHolder,
+                          ChokepointRegistry chokepointRegistry,
+                          UnlocodePortSnapper portSnapper) {
         this.graphHopper = Objects.requireNonNull(graphHopper, "graphHopper");
         this.executorService = Objects.requireNonNull(executorService, "executorService");
         Objects.requireNonNull(metrics, "metrics");
@@ -108,7 +108,7 @@ public class MatrixResource {
         this.routeThroughput = metrics.meter("matrix.routes.per_second");
         
         // Sea routing components are optional
-        this.routingEngineRegistry = routingEngineRegistry;
+        this.seaHopper = seaHopperHolder.getSeaHopper();
         this.chokepointRegistry = chokepointRegistry;
         this.portSnapper = portSnapper;
     }
@@ -212,17 +212,15 @@ public class MatrixResource {
      */
     private Response computeSeaMatrix(MatrixRequest request) {
         // Validate sea routing is available
-        if (routingEngineRegistry == null || !routingEngineRegistry.isSeaRoutingAvailable()) {
+        if (seaHopper == null) {
             return Response.ok(MatrixResponse.failure("SEA_ROUTING_UNAVAILABLE",
                     "Sea routing is not configured. Build the sea graph first.")).build();
         }
         
-        if (portSnapper == null) {
+        if (portSnapper == null || portSnapper.getPortCount() == 0) {
             return Response.ok(MatrixResponse.failure("PORT_DATA_UNAVAILABLE",
                     "UN/LOCODE port data is not loaded.")).build();
         }
-        
-        GraphHopper seaHopper = routingEngineRegistry.getHopper(RoutingMode.SEA);
         
         try {
             // Get the sea profile

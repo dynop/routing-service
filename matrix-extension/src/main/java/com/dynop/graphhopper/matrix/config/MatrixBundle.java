@@ -22,16 +22,18 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Dropwizard bundle that wires the shared matrix executor, routing registries, and JAX-RS resource.
+ * Dropwizard bundle that wires the shared matrix executor, sea routing components, and JAX-RS resource.
  * 
  * <p>This bundle:
  * <ul>
  *   <li>Creates and manages the matrix computation thread pool</li>
- *   <li>Initializes the {@link RoutingEngineRegistry} with road and sea hoppers</li>
+ *   <li>Loads the optional sea hopper for maritime routing</li>
  *   <li>Loads the {@link ChokepointRegistry} for sea routing scenarios</li>
  *   <li>Loads the {@link UnlocodePortSnapper} for port coordinate snapping</li>
  *   <li>Registers all dependencies with HK2 for injection into resources</li>
  * </ul>
+ * 
+ * <p>Road routing uses the GraphHopper instance provided by GraphHopperBundle.
  */
 public class MatrixBundle implements ConfiguredBundle<GraphHopperBundleConfiguration> {
 
@@ -55,27 +57,24 @@ public class MatrixBundle implements ConfiguredBundle<GraphHopperBundleConfigura
         environment.lifecycle().manage(new ManagedExecutor(executorService));
         MetricRegistry metrics = environment.metrics();
         
-        // Get the shared GraphHopper instance (road hopper)
-        GraphHopper roadHopper = null;
-        if (configuration instanceof MatrixGraphHopperProvider provider) {
-            try {
-                roadHopper = provider.requireGraphHopper();
-            } catch (Exception e) {
-                LOGGER.warning("GraphHopper not available yet, will use lazy initialization");
-            }
-        }
+        // Road hopper is provided by GraphHopperBundle and injected directly into MatrixResource
+        // We only need to set up the optional sea routing components here
         
         // Try to load sea hopper and related components
         GraphHopper seaHopper = loadSeaHopper(configuration);
         ChokepointRegistry chokepointRegistry = loadChokepointRegistry(configuration);
         UnlocodePortSnapper portSnapper = loadPortSnapper(configuration);
         
-        // Create routing engine registry
-        final GraphHopper finalRoadHopper = roadHopper;
-        final RoutingEngineRegistry routingEngineRegistry = 
-            finalRoadHopper != null 
-                ? new RoutingEngineRegistry(finalRoadHopper, seaHopper)
-                : null;
+        // Ensure chokepoint registry is never null
+        final ChokepointRegistry finalChokepointRegistry = 
+            chokepointRegistry != null ? chokepointRegistry : new ChokepointRegistry();
+        
+        // Ensure port snapper is never null (empty port list means no snapping available)
+        final UnlocodePortSnapper finalPortSnapper = 
+            portSnapper != null ? portSnapper : new UnlocodePortSnapper(List.of());
+        
+        // Store sea hopper reference for injection
+        final SeaHopperHolder seaHopperHolder = new SeaHopperHolder(seaHopper);
 
         environment.jersey().register(new AbstractBinder() {
             @Override
@@ -85,15 +84,10 @@ public class MatrixBundle implements ConfiguredBundle<GraphHopperBundleConfigura
                         .named(MatrixResourceBindings.EXECUTOR_BINDING);
                 bind(metrics).to(MetricRegistry.class);
                 
-                if (routingEngineRegistry != null) {
-                    bind(routingEngineRegistry).to(RoutingEngineRegistry.class);
-                }
-                if (chokepointRegistry != null) {
-                    bind(chokepointRegistry).to(ChokepointRegistry.class);
-                }
-                if (portSnapper != null) {
-                    bind(portSnapper).to(UnlocodePortSnapper.class);
-                }
+                // Bind sea routing components (always bind, even when disabled)
+                bind(seaHopperHolder).to(SeaHopperHolder.class);
+                bind(finalChokepointRegistry).to(ChokepointRegistry.class);
+                bind(finalPortSnapper).to(UnlocodePortSnapper.class);
             }
         });
 
@@ -103,8 +97,8 @@ public class MatrixBundle implements ConfiguredBundle<GraphHopperBundleConfigura
             "MatrixBundle initialized: poolSize=%d, seaRouting=%s, chokepoints=%d, ports=%d",
             poolSize,
             seaHopper != null ? "enabled" : "disabled",
-            chokepointRegistry != null ? chokepointRegistry.size() : 0,
-            portSnapper != null ? portSnapper.getPortCount() : 0
+            finalChokepointRegistry.size(),
+            finalPortSnapper.getPortCount()
         ));
     }
 
