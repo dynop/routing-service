@@ -7,8 +7,11 @@ services:
     volumes:
       - ../../osm-data/europe:/app/osm
       - ./graph-cache:/app/graph-cache
+      - ./graph-cache/sea:/app/graph-cache/sea
     ports:
       - "8080:8080"
     environment:
       - JAVA_OPTS=-Xms40g -Xmx40g
+      # Enable both road and sea routing
+      - ROUTING_MODES=road,sea
     restart: unless-stopped

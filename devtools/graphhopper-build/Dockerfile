@@ -19,11 +19,24 @@ WORKDIR /app
 
 # Bring in the shaded application JAR and configuration assets
 COPY --from=builder /build/matrix-extension/target/matrix-server.jar /app/app.jar
+
+# Road routing configuration
 COPY devtools/graphhopper-build/config.yml /app/config.yml
 COPY devtools/graphhopper-build/dynop-truck.json /app/dynop-truck.json
 
+# Sea routing configuration
+COPY devtools/graphhopper-build/sea-config.yml /app/sea-config.yml
+COPY devtools/graphhopper-build/dynop-ship.json /app/dynop-ship.json
+
+# Natural Earth data for sea routing (land mask)
+COPY natural-earth-data/ /app/natural-earth-data/
+
+# UN/LOCODE port data for sea routing
+COPY unlocode-data/ /app/unlocode-data/
+
 VOLUME /app/osm
 VOLUME /app/graph-cache
+VOLUME /app/graph-cache/sea
 
 EXPOSE 8080
 ENTRYPOINT ["sh", "-c", "exec java ${JAVA_OPTS:-} -jar app.jar server config.yml"]

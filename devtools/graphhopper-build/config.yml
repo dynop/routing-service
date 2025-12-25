@@ -1,5 +1,5 @@
-# GraphHopper Configuration - Truck Routing Optimized
-# Production-ready configuration for European truck routing (v11.0+)
+# GraphHopper Configuration - Road & Sea Routing
+# Production-ready configuration for European truck routing + global sea routing (v11.0+)
 
 graphhopper:
   custom_models.directory: /app
@@ -25,6 +25,27 @@ graphhopper:
   # Contraction Hierarchies (CH) for faster routing
   profiles_ch:
     - profile: truck
+
+# Sea routing configuration
+sea:
+  # Sea graph location (built by SeaLaneGraphBuilder)
+  graph.location: /app/graph-cache/sea
+  
+  # UN/LOCODE port data directory
+  unlocode.directory: /app/unlocode-data
+  
+  # Natural Earth land mask for graph building
+  landmask.file: /app/natural-earth-data/ne_50m_land.shp
+  
+  # Port snapping configuration
+  port_snapping:
+    max_snap_distance_km: 300.0
+  
+  # Ship profile configuration
+  profiles:
+    - name: ship
+      custom_model_files: [dynop-ship.json]
+      turn_costs: false
 
 # Dropwizard server configuration
 server:
