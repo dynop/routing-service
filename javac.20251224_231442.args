@@ -1,0 +1,2 @@
+-Xlint:all
+matrix-extension/src/main/java/com/dynop/graphhopper/matrix/config/RoutingEngineRegistry.java
