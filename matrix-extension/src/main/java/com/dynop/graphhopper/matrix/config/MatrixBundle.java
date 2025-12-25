@@ -156,14 +156,14 @@ public class MatrixBundle implements ConfiguredBundle<GraphHopperBundleConfigura
             seaHopper.setGraphHopperLocation(seaGraphLocation);
             
             // Add a ship profile BEFORE creating encoding manager
-            // Use custom weighting with a simple distance-based model
+            // Use custom weighting with ship-specific speed (25 km/h typical container ship speed)
             com.graphhopper.config.Profile shipProfile = new com.graphhopper.config.Profile("ship");
             shipProfile.setWeighting("custom");
             
-            // Create a simple custom model for distance-based routing
+            // Create custom model matching dynop-ship.json configuration
             com.graphhopper.util.CustomModel customModel = new com.graphhopper.util.CustomModel();
-            customModel.setDistanceInfluence(100.0); // Pure distance-based routing
-            customModel.addToSpeed(com.graphhopper.json.Statement.If("true", com.graphhopper.json.Statement.Op.LIMIT, "100"));
+            customModel.setDistanceInfluence(0.001); // Low distance influence for time-optimal routing
+            customModel.addToSpeed(com.graphhopper.json.Statement.If("true", com.graphhopper.json.Statement.Op.LIMIT, "25"));
             
             shipProfile.setCustomModel(customModel);
             seaHopper.setProfiles(shipProfile);
